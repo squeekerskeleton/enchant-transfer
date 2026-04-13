@@ -10,6 +10,7 @@ import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -19,30 +20,11 @@ public class EnchantTransferPlugin extends JavaPlugin implements Listener {
 
     private Logger log;
 
-    // -----------------------------------------------------------------------
-    // CONFIGURATION
-    // -----------------------------------------------------------------------
-
-    // The output material your merge plugin produces
-    private static final Material RESULT_MATERIAL = Material.ELYTRA;
-
-    // The custom names your merge plugin gives the result.
-    // Add or remove names here to match yours exactly (case-sensitive).
-    private static final String[] RESULT_NAMES = {
-        "Diamond Infused Elytra",
-        "Netherite Infused Elytra",
-        "Iron Infused Elytra",
-        "Golden Infused Elytra",
-        "Chainmail Infused Elytra"
-    };
-
-    // -----------------------------------------------------------------------
-
     @Override
     public void onEnable() {
         log = getLogger();
         getServer().getPluginManager().registerEvents(this, this);
-        log.info("EnchantTransfer enabled — watching for anvil merges.");
+        log.info("EnchantTransfer enabled.");
     }
 
     @Override
@@ -50,58 +32,85 @@ public class EnchantTransferPlugin extends JavaPlugin implements Listener {
         log.info("EnchantTransfer disabled.");
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = false)
+    // Run at LOWEST so we fire first, then also schedule a delayed re-apply
+    // so that if the merge plugin overwrites the result after us, we fix it
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onAnvilPrepare(PrepareAnvilEvent event) {
-        ItemStack result = event.getResult();
-
-        // Must be an elytra result
-        if (result == null || result.getType() != RESULT_MATERIAL) return;
-
-        // Must have one of our custom names
-        ItemMeta resultMeta = result.getItemMeta();
-        if (resultMeta == null || !resultMeta.hasDisplayName()) return;
-        if (!isInfusedElytra(resultMeta.getDisplayName())) return;
-
         AnvilInventory inv = event.getInventory();
-        ItemStack leftSlot  = inv.getItem(0); // first item placed in anvil
-        ItemStack rightSlot = inv.getItem(1); // second item placed in anvil
+        ItemStack leftSlot  = inv.getItem(0);
+        ItemStack rightSlot = inv.getItem(1);
 
-        // Collect enchantments from both slots
+        // Collect enchantments from BOTH input slots regardless of material
         Map<Enchantment, Integer> collected = new HashMap<>();
         collectFrom(leftSlot,  collected);
         collectFrom(rightSlot, collected);
 
         if (collected.isEmpty()) return;
 
-        // Apply enchantments to result
-        ItemStack modified = result.clone();
-        ItemMeta  meta     = modified.getItemMeta();
-        if (meta == null) return;
+        // Apply immediately
+        applyToResult(event.getResult(), collected, inv);
 
-        // unsafe=true bypasses vanilla level caps
-        collected.forEach((ench, level) -> meta.addEnchant(ench, level, true));
-        modified.setItemMeta(meta);
-        event.setResult(modified);
+        // Also schedule a 1-tick delayed apply as a safety net in case
+        // another plugin (the merge plugin) overwrites the result after us
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                ItemStack result = inv.getResult();
+                if (result == null || result.getType() == Material.AIR) return;
+                applyToResult(result, collected, inv);
+            }
+        }.runTaskLater(this, 1L);
+    }
 
-        log.info("EnchantTransfer: applied " + collected.size()
-            + " enchantment(s) to " + resultMeta.getDisplayName());
+    // Also listen at MONITOR priority to catch result set by other plugins
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onAnvilPrepareMonitor(PrepareAnvilEvent event) {
+        AnvilInventory inv = event.getInventory();
+        ItemStack result = event.getResult();
+        if (result == null || result.getType() == Material.AIR) return;
+
+        ItemStack leftSlot  = inv.getItem(0);
+        ItemStack rightSlot = inv.getItem(1);
+
+        Map<Enchantment, Integer> collected = new HashMap<>();
+        collectFrom(leftSlot,  collected);
+        collectFrom(rightSlot, collected);
+
+        if (collected.isEmpty()) return;
+
+        applyToResult(result, collected, inv);
     }
 
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
-    private boolean isInfusedElytra(String displayName) {
-        for (String name : RESULT_NAMES) {
-            if (name.equals(displayName)) return true;
+    private void applyToResult(ItemStack result, Map<Enchantment, Integer> enchants, AnvilInventory inv) {
+        if (result == null || result.getType() == Material.AIR) return;
+
+        ItemMeta meta = result.getItemMeta();
+        if (meta == null) return;
+
+        boolean changed = false;
+        for (Map.Entry<Enchantment, Integer> entry : enchants.entrySet()) {
+            int existing = meta.getEnchantLevel(entry.getKey());
+            if (entry.getValue() > existing) {
+                meta.addEnchant(entry.getKey(), entry.getValue(), true);
+                changed = true;
+            }
         }
-        return false;
+
+        if (changed) {
+            result.setItemMeta(meta);
+            inv.setResult(result);
+            log.info("EnchantTransfer: applied enchantments to " + result.getType().name()
+                + (meta.hasDisplayName() ? " (" + meta.getDisplayName() + ")" : ""));
+        }
     }
 
     private void collectFrom(ItemStack item, Map<Enchantment, Integer> into) {
-        if (item == null) return;
+        if (item == null || item.getType() == Material.AIR) return;
         for (Map.Entry<Enchantment, Integer> entry : item.getEnchantments().entrySet()) {
-            // Keep highest level if same enchant appears on both items
             into.merge(entry.getKey(), entry.getValue(), Math::max);
         }
     }
