@@ -1,0 +1,6 @@
+name: EnchantTransfer
+version: 1.1.0
+main: com.example.enchanttransfer.EnchantTransferPlugin
+api-version: '1.21'
+description: Transfers enchantments from crafting ingredients onto the result item (Elytra+Chestplate merge). Compatible with Mehboss CustomRecipes.
+authors: [YourName]
